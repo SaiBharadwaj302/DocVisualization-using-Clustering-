@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Cluster Visualization</title>
+  <link rel="stylesheet" href="styles.css">
+  <!-- Include jQuery and jQuery UI for sortable -->
+  <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+  <script src="https://code.jquery.com/ui/1.13.0/jquery-ui.min.js"></script>
+  <!-- Include D3 library -->
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+</head>
+<body>
+  <div class="container">
+    <!-- Sidebar for clusters -->
+    <div class="sidebar">
+      <h1>Document Clusters</h1>
+      <!-- Button container for selecting clustering results -->
+      <div id="clustering-buttons" class="button-container">
+        <button id="btn-kmeans" class="btn">K-Means</button>
+        <button id="btn-biclustering" class="btn">Biclustering</button>
+        <button id="btn-hierarchical" class="btn">Hierarchical</button>
+      </div>
+      <div id="clusters"></div>
+    </div>
+
+    <!-- Main workspace -->
+    <div class="main-content">
+      <div class="workspace-header">
+        <h1>Document Workspace</h1>
+        <!-- Arrange, Reset, Group and Delete buttons -->
+        <div>
+          <button id="arrange-btn" class="btn">Arrange Grid</button>
+          <button id="reset-btn" class="btn">Reset</button>
+          <button id="group-btn" class="btn">Group</button>
+          <button id="delete-btn" class="btn">Delete</button>
+        </div>
+      </div>
+      <div id="workspace"></div>
+    </div>
+  </div>
+
+  <!-- Minimized bar for documents -->
+  <div id="minimized-bar">
+    <div id="minimized-docs"></div>
+  </div>
+
+  <script>
+    const DOCS_PATH = 'dataset/dataset';
+    const workspace = d3.select('#workspace');
+    const minimizedContainer = d3.select('#minimized-docs');
+    const minimizedBar = d3.select('#minimized-bar');
+    let docZIndex = 0;
+    let docStackOffset = 0;  // For cascading offset
+    const offsetVal = 20;    // Pixels to offset each new window
+
+    // Load clustering results from a given JSON file
+    function loadClusters(jsonFile) {
+      $("#clusters").empty();
+      d3.json(jsonFile).then(function(data) {
+        Object.keys(data).forEach(cluster => {
+          // Count the number of files for this cluster
+          const numFiles = data[cluster].length;
+          let block = $('<div class="cluster-block" data-cluster="' + cluster + '"></div>');
+          let header = $('<h2>Cluster ' + cluster + ' (' + numFiles + ') <button class="toggle-btn">Toggle</button></h2>');
+          block.append(header);
+          let ul = $('<ul></ul>');
+          data[cluster].forEach(function(docId) {
+            ul.append('<li class="file-item" data-id="' + docId + '">' + docId + '</li>');
+          });
+          block.append(ul);
+          $('#clusters').append(block);
+        });
+        $("#clusters").sortable();
+      }).catch(function(error) {
+        console.error("Error loading cluster data:", error);
+        alert("Failed to load cluster data from " + jsonFile);
+      });
+    }
+
+    // Default load: K-Means clustering results
+    loadClusters("document_clusters_kmeans.json");
+
+    // Event listeners for clustering buttons
+    $("#btn-kmeans").on("click", function() {
+      loadClusters("document_clusters_kmeans.json");
+    });
+    $("#btn-biclustering").on("click", function() {
+      loadClusters("document_clusters_biclustering.json");
+    });
+    $("#btn-hierarchical").on("click", function() {
+      loadClusters("document_clusters1.json");
+    });
+
+    // Toggle cluster list visibility
+    $(document).on("click", ".toggle-btn", function(event) {
+      event.stopPropagation();
+      $(this).closest(".cluster-block").find("ul").toggle();
+    });
+
+    // Open a document when a file is clicked from a cluster.
+    // Capture the cluster id from the clicked cluster block.
+    $(document).on("click", ".file-item", function(event) {
+      const docId = $(this).data("id");
+      const cluster = $(this).closest(".cluster-block").data("cluster");
+      // Even if cluster is 0, it is now preserved.
+      openDocuments([docId], (cluster === undefined || cluster === null) ? 'unknown' : cluster);
+      event.stopPropagation();
+    });
+
+    // Open document windows in a cascading stack centered in the workspace.
+    // Optionally store the cluster they belong to as a data attribute.
+    async function openDocuments(ids, cluster) {
+      const wsWidth = parseInt($(".main-content").width());
+      const wsHeight = parseInt($(".main-content").height());
+      const winWidth = 400;  // .document-window width
+      const winHeight = 400; // .document-window height
+      const centerLeft = (wsWidth - winWidth) / 2;
+      const centerTop = (wsHeight - winHeight) / 2;
+
+      for (const id of ids) {
+        if (!document.getElementById(id)) {
+          try {
+            const response = await fetch(`${DOCS_PATH}/${id}`);
+            if (!response.ok) throw new Error('File not found');
+            const content = await response.text();
+
+            // Cascade each window by offsetVal
+            const leftPos = centerLeft + (docStackOffset * offsetVal);
+            const topPos = centerTop + (docStackOffset * offsetVal);
+
+            const docWin = workspace.append('div')
+              .attr('class', 'document-window')
+              .attr('id', id)
+              .style('left', leftPos + 'px')
+              .style('top', topPos + 'px')
+              .style('width', winWidth + 'px')
+              .style('height', winHeight + 'px')
+              .style('z-index', ++docZIndex)
+              .attr('data-original-left', leftPos)
+              .attr('data-original-top', topPos)
+              .attr('data-cluster', (cluster === undefined || cluster === null) ? 'unknown' : cluster);
+
+            docStackOffset++;
+
+            // Create header with title and control buttons container.
+            const header = docWin.append('div')
+              .attr('class', 'document-header');
+            header.append('span')
+              .attr('class', 'doc-title')
+              .text(id);
+            // Container for header buttons (minimize & close) aligned to the right.
+            const btnContainer = header.append('div')
+              .attr('class', 'header-buttons');
+            btnContainer.append('span')
+              .attr('class', 'minimize-button')
+              .text('-')
+              .on('click', () => minimizeDoc(id));
+            btnContainer.append('span')
+              .attr('class', 'close-button')
+              .text('x')
+              .on('click', () => {
+                docWin.remove();
+              });
+            
+            // Document content
+            docWin.append('div')
+              .attr('class', 'document-content')
+              .text(content);
+
+            // Enable dragging
+            docWin.call(d3.drag().on('drag', (event) => {
+              const x = parseInt(docWin.style('left')) || 0;
+              const y = parseInt(docWin.style('top')) || 0;
+              docWin.style('left', `${x + event.dx}px`);
+              docWin.style('top', `${y + event.dy}px`);
+            }));
+          } catch (error) {
+            console.error(`Error loading ${id}:`, error);
+          }
+        }
+      }
+    }
+
+    // Minimize a document window
+    function minimizeDoc(docId) {
+      const docWin = d3.select('#' + docId);
+      if (!docWin.empty()) {
+        docWin.remove();
+        minimizedContainer.append('div')
+          .attr('class', 'minimized-doc')
+          .text(docId)
+          .on('click', () => restoreDoc(docId));
+        minimizedBar.style('display', 'block');
+      }
+    }
+
+    // Restore a minimized document window
+    function restoreDoc(docId) {
+      minimizedContainer.selectAll('.minimized-doc')
+        .filter(function() {
+          return d3.select(this).text() === docId;
+        })
+        .remove();
+      openDocuments([docId]);
+      if (minimizedContainer.selectAll('.minimized-doc').empty()) {
+        minimizedBar.style('display', 'none');
+      }
+    }
+
+    // Arrange document windows into a grid aligned to the right within #workspace.
+    $("#arrange-btn").on("click", function() {
+      const docWins = workspace.selectAll(".document-window").nodes();
+      const count = docWins.length;
+      if (count === 0) return;
+      
+      // Use #workspace dimensions (which is positioned relative)
+      const wsWidth = parseInt($("#workspace").width());
+      const wsHeight = parseInt($("#workspace").height());
+      const cols = Math.ceil(Math.sqrt(count));
+      const rows = Math.ceil(count / cols);
+      const cellWidth = wsWidth / cols;
+      const cellHeight = wsHeight / rows;
+      const rightPadding = 10;
+      
+      docWins.forEach((win, idx) => {
+        const col = idx % cols;
+        const row = Math.floor(idx / cols);
+        // Position so that the rightmost column aligns with the right edge of #workspace.
+        const leftPos = wsWidth - ((col + 1) * cellWidth) + rightPadding;
+        const topPos = row * cellHeight;
+        $(win).animate({
+          left: leftPos + "px",
+          top: topPos + "px",
+          width: (cellWidth - 20) + "px",
+          height: (cellHeight - 20) + "px"
+        }, 200);
+      });
+    });
+
+    // Reset button: restore windows to original (stacked) positions and size.
+    $("#reset-btn").on("click", function() {
+      workspace.selectAll(".document-window").nodes().forEach(win => {
+        const originalLeft = $(win).attr("data-original-left");
+        const originalTop = $(win).attr("data-original-top");
+        $(win).animate({
+          left: originalLeft + "px",
+          top: originalTop + "px",
+          width: "400px",
+          height: "400px"
+        }, 500);
+      });
+    });
+
+    // Group button: group open documents by their cluster attribute and display group labels.
+    $("#group-btn").on("click", function() {
+      // Remove any existing group labels
+      $(".group-label").remove();
+      
+      const docWins = workspace.selectAll(".document-window").nodes();
+      if (docWins.length === 0) return;
+      
+      // Group windows by their data-cluster attribute.
+      const groups = {};
+      docWins.forEach(win => {
+        const cluster = $(win).attr("data-cluster");
+        const key = (cluster === undefined || cluster === null || cluster === "") ? "unknown" : cluster;
+        if (!groups[key]) {
+          groups[key] = [];
+        }
+        groups[key].push(win);
+      });
+      
+      // Determine workspace width and calculate a column width per group.
+      const wsWidth = parseInt($("#workspace").width());
+      const margin = 10;
+      const groupKeys = Object.keys(groups);
+      const colWidth = wsWidth / groupKeys.length;
+      
+      // For each group, add a group label and arrange its documents in a vertical column.
+      groupKeys.forEach((clusterKey, colIndex) => {
+        // Create and position a group label in the workspace.
+        const label = $("<div class='group-label'>" + clusterKey + "</div>");
+        label.css({
+          position: "absolute",
+          left: (colIndex * colWidth + margin) + "px",
+          top: "0px",
+          width: (colWidth - 2 * margin) + "px",
+          "text-align": "center",
+          "font-size": "14px",
+          "font-weight": "bold",
+          "background": "#ecf0f1",
+          "padding": "5px 0"
+        });
+        $("#workspace").append(label);
+        
+        const groupDocs = groups[clusterKey];
+        const docHeight = 400; 
+        const labelHeight = 30; // space for the group label
+        groupDocs.forEach((win, rowIndex) => {
+          const leftPos = colIndex * colWidth + margin;
+          const topPos = rowIndex * (docHeight + margin) + margin + labelHeight;
+          $(win).animate({
+            left: leftPos + "px",
+            top: topPos + "px",
+            width: (colWidth - 2 * margin) + "px",
+            height: docHeight + "px"
+          }, 500);
+        });
+      });
+    });
+
+    // Delete button: remove all document windows, group labels and minimized docs; reset counters.
+    $("#delete-btn").on("click", function() {
+      workspace.selectAll(".document-window").remove();
+      $(".group-label").remove();
+      minimizedContainer.empty();
+      minimizedBar.style('display', 'none');
+      docZIndex = 0;
+      docStackOffset = 0;
+    });
+  </script>
+</body>
+</html>
